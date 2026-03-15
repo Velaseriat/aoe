@@ -1,0 +1,8 @@
+[package]
+name = "aoe-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "Shared protocol for AOE audio streaming (Beta -> Alpha)"
+
+[dependencies]
+bytes = "1.5"

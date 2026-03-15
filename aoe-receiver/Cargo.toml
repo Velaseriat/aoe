@@ -1,0 +1,17 @@
+[package]
+name = "aoe-receiver"
+version = "0.1.0"
+edition = "2021"
+description = "AOE receiver (Alpha): receives stream and plays audio, system tray status"
+
+[[bin]]
+name = "aoe-receiver"
+path = "src/main.rs"
+
+[dependencies]
+aoe-protocol = { path = "../aoe-protocol" }
+cpal = "0.17"
+bytes = "1.5"
+tao = "0.31"
+tray-icon = "0.21"
+image = "0.25"
