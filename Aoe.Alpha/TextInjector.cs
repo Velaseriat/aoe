@@ -115,10 +115,14 @@ public static class TextInjector
         public InputUnion u;
     }
 
+    // The union must include the largest member (MOUSEINPUT) so Marshal.SizeOf<INPUT> matches
+    // the real Win32 INPUT size (40 bytes on x64). A short cbSize makes SendInput fail with 87.
     [StructLayout(LayoutKind.Explicit)]
     private struct InputUnion
     {
+        [FieldOffset(0)] public MOUSEINPUT mi;
         [FieldOffset(0)] public KEYBDINPUT ki;
+        [FieldOffset(0)] public HARDWAREINPUT hi;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -129,6 +133,25 @@ public static class TextInjector
         public uint dwFlags;
         public uint time;
         public IntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MOUSEINPUT
+    {
+        public int dx;
+        public int dy;
+        public uint mouseData;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct HARDWAREINPUT
+    {
+        public uint uMsg;
+        public ushort wParamL;
+        public ushort wParamH;
     }
 
     [DllImport("user32.dll", SetLastError = true)]

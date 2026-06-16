@@ -62,6 +62,8 @@ public sealed class BetaTrayContext : ApplicationContext
     {
         BetaStatus.Ready => Color.LimeGreen,
         BetaStatus.Recording => Color.Red,
+        BetaStatus.AckRequest => Color.Cyan,
+        BetaStatus.GotResult => Color.Magenta,
         BetaStatus.SpeachesUnavailable => Color.Gray,
         BetaStatus.Error => Color.Red,
         _ => Color.Gray,
@@ -72,6 +74,8 @@ public sealed class BetaTrayContext : ApplicationContext
         BetaStatus.SpeachesUnavailable => "Speaches unavailable",
         BetaStatus.Ready => "ready",
         BetaStatus.Recording => "recording",
+        BetaStatus.AckRequest => "request received",
+        BetaStatus.GotResult => "transcript received",
         BetaStatus.Error => $"error: {detail}",
         _ => status.ToString(),
     };

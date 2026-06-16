@@ -11,6 +11,12 @@ public enum BetaStatus
     Ready,
     Recording,
     Error,
+
+    /// <summary>Transient: acknowledged the capture request from Alpha (cyan flash).</summary>
+    AckRequest,
+
+    /// <summary>Transient: received the transcript back from Speaches (magenta flash).</summary>
+    GotResult,
 }
 
 /// <summary>
@@ -35,6 +41,10 @@ public sealed class BetaService : IDisposable
     private volatile bool _capturing;
     private volatile bool _recording;
     private volatile bool _speachesHealthy;
+
+    private const int FlashMs = 500;
+    private long _statusToken;
+    private long _flashUntilTicks;
 
     public event Action<BetaStatus, string?>? StatusChanged;
 
@@ -73,13 +83,32 @@ public sealed class BetaService : IDisposable
         }
     }
 
-    /// <summary>Sets the idle icon (green if Speaches is up, else gray). No-op while recording.</summary>
+    /// <summary>Sets the idle icon (green if Speaches is up, else gray). No-op while recording or flashing.</summary>
     private void RefreshIdleStatus()
     {
         if (_recording)
             return;
+        if (Interlocked.Read(ref _flashUntilTicks) > DateTime.UtcNow.Ticks)
+            return;
         Report(_speachesHealthy ? BetaStatus.Ready : BetaStatus.SpeachesUnavailable,
                _speachesHealthy ? "Speaches ready" : "Speaches unavailable");
+    }
+
+    /// <summary>Shows a transient status for ~0.5s, then reverts to the idle icon.</summary>
+    private void Flash(BetaStatus status, string? detail)
+    {
+        long token = Interlocked.Increment(ref _statusToken);
+        Interlocked.Exchange(ref _flashUntilTicks, DateTime.UtcNow.AddMilliseconds(FlashMs).Ticks);
+        Report(status, detail);
+        _ = Task.Run(async () =>
+        {
+            try { await Task.Delay(FlashMs, _cts.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
+            if (Interlocked.Read(ref _statusToken) != token)
+                return; // a newer flash/status superseded this one
+            Interlocked.Exchange(ref _flashUntilTicks, 0);
+            RefreshIdleStatus();
+        });
     }
 
     // ---- Alpha control connection ----
@@ -221,7 +250,9 @@ public sealed class BetaService : IDisposable
 
         byte[] pcm;
         lock (_bufLock) { pcm = _audioBuffer.ToArray(); }
-        RefreshIdleStatus();
+
+        // Cyan: acknowledge we received the STT request from Alpha.
+        Flash(BetaStatus.AckRequest, "request received");
 
         double seconds = pcm.Length / (double)(SampleRate * Channels * 2);
         if (pcm.Length == 0)
@@ -244,11 +275,14 @@ public sealed class BetaService : IDisposable
             string text = await _speaches.TranscribeAsync(wav, ct).ConfigureAwait(false);
             sw.Stop();
             Log.Info($"session {sessionId}: transcript ({sw.ElapsedMilliseconds} ms): \"{text}\"");
+            // Magenta: got the transcript back from Speaches.
+            Flash(BetaStatus.GotResult, "transcript received");
             await peer.SendControlAsync(ControlMessage.Transcript(sessionId, text), ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             Log.Error($"session {sessionId}: transcription failed", ex);
+            Flash(BetaStatus.Error, ex.Message);
             try { await peer.SendControlAsync(ControlMessage.ErrorMessage($"transcription: {ex.Message}"), ct).ConfigureAwait(false); }
             catch { /* Alpha may have disconnected */ }
         }
