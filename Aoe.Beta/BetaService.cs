@@ -7,15 +7,16 @@ namespace Aoe.Beta;
 
 public enum BetaStatus
 {
-    Listening,
-    ClientConnected,
+    SpeachesUnavailable,
+    Ready,
     Recording,
     Error,
 }
 
 /// <summary>
-/// TCP control server that captures the default microphone on command and streams 16 kHz mono
-/// 16-bit PCM to the connected Alpha client.
+/// Beta owns the microphone AND the Speaches connection. On command from Alpha it captures the
+/// mic locally, then transcribes via Speaches and sends only the resulting text back to Alpha.
+/// The tray icon reflects Speaches connectivity (gray/green) and recording (red).
 /// </summary>
 public sealed class BetaService : IDisposable
 {
@@ -23,27 +24,74 @@ public sealed class BetaService : IDisposable
     public const int Channels = 1;
     public const int BitsPerSample = 16;
 
-    private readonly int _port;
+    private readonly BetaConfig _config;
+    private readonly SpeachesClient _speaches;
     private readonly CancellationTokenSource _cts = new();
 
     private WaveInEvent? _waveIn;
     private FramedPeer? _peer;
-    private long _activeSession;
+    private MemoryStream _audioBuffer = new();
+    private readonly object _bufLock = new();
     private volatile bool _capturing;
+    private volatile bool _recording;
+    private volatile bool _speachesHealthy;
 
     public event Action<BetaStatus, string?>? StatusChanged;
 
-    public BetaService(int port) => _port = port;
+    public BetaService(BetaConfig config)
+    {
+        _config = config;
+        _speaches = new SpeachesClient(config);
+    }
 
-    public void Start() => _ = Task.Run(() => RunAsync(_cts.Token));
+    public void Start()
+    {
+        _ = Task.Run(() => RunAsync(_cts.Token));
+        _ = Task.Run(() => HealthLoopAsync(_cts.Token));
+    }
+
+    // ---- Speaches health monitoring (drives gray vs green when idle) ----
+
+    private async Task HealthLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            bool healthy = await _speaches.IsHealthyAsync(ct).ConfigureAwait(false);
+            if (healthy != _speachesHealthy)
+            {
+                _speachesHealthy = healthy;
+                Log.Info($"Speaches health: {(healthy ? "up" : "down")}");
+                RefreshIdleStatus();
+            }
+            else
+            {
+                _speachesHealthy = healthy;
+            }
+
+            try { await Task.Delay(TimeSpan.FromSeconds(7), ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { break; }
+        }
+    }
+
+    /// <summary>Sets the idle icon (green if Speaches is up, else gray). No-op while recording.</summary>
+    private void RefreshIdleStatus()
+    {
+        if (_recording)
+            return;
+        Report(_speachesHealthy ? BetaStatus.Ready : BetaStatus.SpeachesUnavailable,
+               _speachesHealthy ? "Speaches ready" : "Speaches unavailable");
+    }
+
+    // ---- Alpha control connection ----
 
     private async Task RunAsync(CancellationToken ct)
     {
-        var listener = new TcpListener(IPAddress.Any, _port);
+        var listener = new TcpListener(IPAddress.Any, _config.Port);
         try
         {
             listener.Start();
-            Report(BetaStatus.Listening, $"Listening on port {_port}");
+            Log.Info($"listening on port {_config.Port}");
+            RefreshIdleStatus();
 
             while (!ct.IsCancellationRequested)
             {
@@ -52,11 +100,12 @@ public sealed class BetaService : IDisposable
                 catch (OperationCanceledException) { break; }
 
                 await HandleClientAsync(client, ct).ConfigureAwait(false);
-                Report(BetaStatus.Listening, $"Listening on port {_port}");
+                RefreshIdleStatus();
             }
         }
         catch (Exception ex)
         {
+            Log.Error("listener error", ex);
             Report(BetaStatus.Error, ex.Message);
         }
         finally
@@ -73,7 +122,7 @@ public sealed class BetaService : IDisposable
             client.NoDelay = true;
             var peer = new FramedPeer(stream);
             _peer = peer;
-            Report(BetaStatus.ClientConnected, RemoteName(client));
+            Log.Info($"Alpha connected: {RemoteName(client)}");
 
             try
             {
@@ -81,22 +130,22 @@ public sealed class BetaService : IDisposable
                 {
                     Frame? frame = await peer.ReadFrameAsync(ct).ConfigureAwait(false);
                     if (frame is null)
-                        break; // client disconnected
-
+                        break;
                     if (frame.Value.Kind != FrameKind.Control)
                         continue;
 
                     var msg = FrameProtocol.DecodeControl(frame.Value);
-                    await HandleControlAsync(peer, msg, ct).ConfigureAwait(false);
+                    HandleControl(peer, msg);
                 }
             }
             catch (OperationCanceledException) { }
             catch (Exception ex)
             {
-                Report(BetaStatus.Error, ex.Message);
+                Log.Error("client loop error", ex);
             }
             finally
             {
+                Log.Info("Alpha disconnected");
                 StopCapture();
                 _peer = null;
                 peer.Dispose();
@@ -104,38 +153,48 @@ public sealed class BetaService : IDisposable
         }
     }
 
-    private async Task HandleControlAsync(FramedPeer peer, ControlMessage msg, CancellationToken ct)
+    private void HandleControl(FramedPeer peer, ControlMessage msg)
     {
         switch (msg.Type)
         {
             case ControlType.StartCapture:
                 StartCapture(msg.SessionId);
-                await peer.SendControlAsync(
-                    ControlMessage.CaptureStarted(msg.SessionId, SampleRate, Channels), ct).ConfigureAwait(false);
                 break;
-
             case ControlType.StopCapture:
-                StopCapture();
-                await peer.SendControlAsync(ControlMessage.CaptureStopped(msg.SessionId), ct).ConfigureAwait(false);
+                FinishCapture(peer, msg.SessionId);
                 break;
         }
     }
 
+    // ---- Microphone capture ----
+
     private void StartCapture(long sessionId)
     {
         StopCapture();
-        _activeSession = sessionId;
+        lock (_bufLock) { _audioBuffer = new MemoryStream(); }
 
-        var waveIn = new WaveInEvent
+        try
         {
-            WaveFormat = new WaveFormat(SampleRate, BitsPerSample, Channels),
-            BufferMilliseconds = 50,
-        };
-        waveIn.DataAvailable += OnDataAvailable;
-        _waveIn = waveIn;
-        _capturing = true;
-        waveIn.StartRecording();
-        Report(BetaStatus.Recording, "Recording");
+            var waveIn = new WaveInEvent
+            {
+                WaveFormat = new WaveFormat(SampleRate, BitsPerSample, Channels),
+                BufferMilliseconds = 50,
+            };
+            waveIn.DataAvailable += OnDataAvailable;
+            _waveIn = waveIn;
+            _capturing = true;
+            _recording = true;
+            waveIn.StartRecording();
+            Log.Info($"capture started: session {sessionId}, {SampleRate} Hz x{Channels}");
+            Report(BetaStatus.Recording, "Recording");
+        }
+        catch (Exception ex)
+        {
+            // Most commonly: no recording device / mic permission denied.
+            Log.Error("failed to start microphone capture", ex);
+            _recording = false;
+            Report(BetaStatus.Error, $"mic: {ex.Message}");
+        }
     }
 
     private void StopCapture()
@@ -154,24 +213,52 @@ public sealed class BetaService : IDisposable
         }
     }
 
-    private void OnDataAvailable(object? sender, WaveInEventArgs e)
+    /// <summary>Stops capture, then transcribes the buffered audio and sends text back to Alpha.</summary>
+    private void FinishCapture(FramedPeer peer, long sessionId)
     {
-        if (!_capturing || _peer is not { } peer || e.BytesRecorded <= 0)
+        StopCapture();
+        _recording = false;
+
+        byte[] pcm;
+        lock (_bufLock) { pcm = _audioBuffer.ToArray(); }
+        RefreshIdleStatus();
+
+        double seconds = pcm.Length / (double)(SampleRate * Channels * 2);
+        if (pcm.Length == 0)
+        {
+            Log.Warn($"session {sessionId}: no audio captured");
             return;
+        }
 
-        // Copy only the valid bytes; the NAudio buffer is reused.
-        byte[] pcm = new byte[e.BytesRecorded];
-        Buffer.BlockCopy(e.Buffer, 0, pcm, 0, e.BytesRecorded);
+        Log.Info($"session {sessionId}: {pcm.Length} bytes (~{seconds:F1}s); transcribing");
+        // Fire-and-forget so rapid-fire PTT requests don't block each other; text returns as ready.
+        _ = TranscribeAndReplyAsync(peer, sessionId, pcm, _cts.Token);
+    }
 
+    private async Task TranscribeAndReplyAsync(FramedPeer peer, long sessionId, byte[] pcm, CancellationToken ct)
+    {
         try
         {
-            // Synchronous send preserves frame order from the capture thread.
-            peer.SendAudioAsync(pcm).GetAwaiter().GetResult();
+            byte[] wav = WavBuilder.BuildPcm16(pcm, SampleRate, Channels);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            string text = await _speaches.TranscribeAsync(wav, ct).ConfigureAwait(false);
+            sw.Stop();
+            Log.Info($"session {sessionId}: transcript ({sw.ElapsedMilliseconds} ms): \"{text}\"");
+            await peer.SendControlAsync(ControlMessage.Transcript(sessionId, text), ct).ConfigureAwait(false);
         }
-        catch
+        catch (Exception ex)
         {
-            // Connection likely dropped; capture will be torn down by the read loop.
+            Log.Error($"session {sessionId}: transcription failed", ex);
+            try { await peer.SendControlAsync(ControlMessage.ErrorMessage($"transcription: {ex.Message}"), ct).ConfigureAwait(false); }
+            catch { /* Alpha may have disconnected */ }
         }
+    }
+
+    private void OnDataAvailable(object? sender, WaveInEventArgs e)
+    {
+        if (!_capturing || e.BytesRecorded <= 0)
+            return;
+        lock (_bufLock) { _audioBuffer.Write(e.Buffer, 0, e.BytesRecorded); }
     }
 
     private static string RemoteName(TcpClient client)

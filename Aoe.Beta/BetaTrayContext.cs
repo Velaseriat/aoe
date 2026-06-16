@@ -1,5 +1,3 @@
-using Aoe.Protocol;
-
 namespace Aoe.Beta;
 
 /// <summary>Tray-only application context: no main window, just a status icon and the service.</summary>
@@ -13,7 +11,7 @@ public sealed class BetaTrayContext : ApplicationContext
     public BetaTrayContext()
     {
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
-        int port = ResolvePort();
+        var config = BetaConfig.Load();
 
         _tray = new NotifyIcon
         {
@@ -23,17 +21,17 @@ public sealed class BetaTrayContext : ApplicationContext
         };
 
         var menu = new ContextMenuStrip();
-        menu.Items.Add("AOE Beta (mic)").Enabled = false;
+        menu.Items.Add("AOE Beta (mic + Speaches)").Enabled = false;
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Quit", null, (_, _) => ExitThread());
         _tray.ContextMenuStrip = menu;
 
         // A balloon toast pops up even when Windows hides the icon in the tray overflow.
         _tray.BalloonTipTitle = "AOE Beta";
-        _tray.BalloonTipText = $"Running in the system tray. Listening for Alpha on port {port}.";
+        _tray.BalloonTipText = $"Running in the system tray. Listening for Alpha on port {config.Port}; Speaches: {config.SpeachesBaseUrl}.";
         _tray.ShowBalloonTip(4000);
 
-        _service = new BetaService(port);
+        _service = new BetaService(config);
         _service.StatusChanged += OnStatusChanged;
         _service.Start();
     }
@@ -62,17 +60,17 @@ public sealed class BetaTrayContext : ApplicationContext
 
     private static Color ColorFor(BetaStatus status) => status switch
     {
-        BetaStatus.ClientConnected => Color.LimeGreen,
+        BetaStatus.Ready => Color.LimeGreen,
         BetaStatus.Recording => Color.Red,
-        BetaStatus.Listening => Color.Gray,
+        BetaStatus.SpeachesUnavailable => Color.Gray,
         BetaStatus.Error => Color.Red,
         _ => Color.Gray,
     };
 
     private static string Describe(BetaStatus status, string? detail) => status switch
     {
-        BetaStatus.Listening => detail ?? "listening",
-        BetaStatus.ClientConnected => $"connected ({detail})",
+        BetaStatus.SpeachesUnavailable => "Speaches unavailable",
+        BetaStatus.Ready => "ready",
         BetaStatus.Recording => "recording",
         BetaStatus.Error => $"error: {detail}",
         _ => status.ToString(),
@@ -80,12 +78,6 @@ public sealed class BetaTrayContext : ApplicationContext
 
     // NotifyIcon.Text has a 63-char limit.
     private static string Truncate(string s) => s.Length <= 63 ? s : s[..63];
-
-    private static int ResolvePort()
-    {
-        string? env = Environment.GetEnvironmentVariable("AOE_PORT");
-        return int.TryParse(env, out int p) ? p : FrameProtocol.DefaultPort;
-    }
 
     protected override void Dispose(bool disposing)
     {

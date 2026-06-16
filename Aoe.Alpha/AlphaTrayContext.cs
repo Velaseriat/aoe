@@ -88,9 +88,8 @@ public sealed class AlphaTrayContext : ApplicationContext
     {
         AlphaStatus.Connected => Color.LimeGreen,
         AlphaStatus.Recording => Color.Red,
-        AlphaStatus.Transcribing => Color.Orange,
+        AlphaStatus.Error => Color.Gold,
         AlphaStatus.Disconnected => Color.Gray,
-        AlphaStatus.Error => Color.Red,
         _ => Color.Gray,
     };
 
@@ -99,7 +98,6 @@ public sealed class AlphaTrayContext : ApplicationContext
         AlphaStatus.Disconnected => detail is null ? "disconnected" : $"disconnected ({detail})",
         AlphaStatus.Connected => detail is null ? "ready" : $"ready - {detail}",
         AlphaStatus.Recording => "recording",
-        AlphaStatus.Transcribing => "transcribing",
         AlphaStatus.Error => $"error: {detail}",
         _ => status.ToString(),
     };

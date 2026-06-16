@@ -18,6 +18,9 @@ public enum ControlType
     CaptureStarted = 2,
     CaptureStopped = 3,
     Error = 4,
+
+    /// <summary>Beta -&gt; Alpha: the transcribed text for a finished capture session.</summary>
+    Transcript = 5,
 }
 
 /// <summary>
@@ -43,6 +46,9 @@ public sealed class ControlMessage
     /// <summary>Set on <see cref="ControlType.Error"/>.</summary>
     public string? Message { get; set; }
 
+    /// <summary>Set on <see cref="ControlType.Transcript"/>: the recognized text.</summary>
+    public string? Text { get; set; }
+
     public static ControlMessage StartCapture(long sessionId, Mode mode) =>
         new() { Type = ControlType.StartCapture, SessionId = sessionId, Mode = mode };
 
@@ -63,4 +69,7 @@ public sealed class ControlMessage
 
     public static ControlMessage ErrorMessage(string message) =>
         new() { Type = ControlType.Error, Message = message };
+
+    public static ControlMessage Transcript(long sessionId, string text) =>
+        new() { Type = ControlType.Transcript, SessionId = sessionId, Text = text };
 }

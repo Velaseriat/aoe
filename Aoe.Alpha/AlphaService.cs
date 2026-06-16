@@ -8,31 +8,23 @@ public enum AlphaStatus
     Disconnected,
     Connected,
     Recording,
-    Transcribing,
     Error,
 }
 
 /// <summary>
-/// Orchestrates the dictation loop: maintains the connection to Beta, drives capture on PTT,
-/// collects streamed audio, transcribes via Speaches, and injects the text on the UI thread.
+/// Alpha is just a screen + keyboard: it detects the PTT key, tells Beta when to capture, and
+/// injects whatever transcript text Beta sends back. All audio + Speaches work happens on Beta.
 /// </summary>
 public sealed class AlphaService : IDisposable
 {
     private readonly AlphaConfig _config;
-    private readonly SpeachesClient _speaches;
     private readonly Action<Action> _postToUi;
     private readonly CancellationTokenSource _cts = new();
 
     private FramedPeer? _peer;
     private volatile bool _connected;
-
     private long _sessionCounter;
     private long _currentSession = -1;
-    private int _sampleRate = BetaDefaults.SampleRate;
-    private int _channels = BetaDefaults.Channels;
-
-    private readonly object _bufLock = new();
-    private MemoryStream _audioBuffer = new();
 
     public event Action<AlphaStatus, string?>? StatusChanged;
 
@@ -40,7 +32,6 @@ public sealed class AlphaService : IDisposable
     {
         _config = config;
         _postToUi = postToUi;
-        _speaches = new SpeachesClient(config);
     }
 
     public void Start() => _ = Task.Run(() => ConnectLoopAsync(_cts.Token));
@@ -51,13 +42,14 @@ public sealed class AlphaService : IDisposable
         FramedPeer? peer = _peer;
         if (!_connected || peer is null)
         {
+            Log.Warn("PTT down but Beta not connected");
             Report(AlphaStatus.Disconnected, "Beta not connected");
             return;
         }
 
         long id = Interlocked.Increment(ref _sessionCounter);
         _currentSession = id;
-        lock (_bufLock) { _audioBuffer = new MemoryStream(); }
+        Log.Info($"PTT down -> StartCapture session {id}");
         Report(AlphaStatus.Recording, null);
         _ = SafeSendAsync(peer, ControlMessage.StartCapture(id, Mode.Dictation));
     }
@@ -67,10 +59,14 @@ public sealed class AlphaService : IDisposable
     {
         FramedPeer? peer = _peer;
         long id = _currentSession;
+        _currentSession = -1;
         if (peer is null || id < 0)
             return;
+        Log.Info($"PTT up -> StopCapture session {id}");
+        // Transcription happens on Beta; the transcript arrives later as a control message.
         _ = SafeSendAsync(peer, ControlMessage.StopCapture(id));
-        // Finalization happens when Beta replies CaptureStopped (ensures all audio arrived).
+        if (_connected)
+            Report(AlphaStatus.Connected, null);
     }
 
     private async Task ConnectLoopAsync(CancellationToken ct)
@@ -86,13 +82,16 @@ public sealed class AlphaService : IDisposable
                 var peer = new FramedPeer(stream);
                 _peer = peer;
                 _connected = true;
+                Log.Info($"connected to Beta {_config.BetaHost}:{_config.BetaPort}");
                 Report(AlphaStatus.Connected, $"{_config.BetaHost}:{_config.BetaPort}");
 
                 await ReadLoopAsync(peer, ct).ConfigureAwait(false);
+                Log.Warn("read loop ended (Beta closed connection)");
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
+                Log.Warn($"connection error: {ex.Message}");
                 Report(AlphaStatus.Disconnected, ex.Message);
             }
             finally
@@ -117,54 +116,23 @@ public sealed class AlphaService : IDisposable
             Frame? frame = await peer.ReadFrameAsync(ct).ConfigureAwait(false);
             if (frame is null)
                 break;
-
-            if (frame.Value.Kind == FrameKind.Audio)
-            {
-                lock (_bufLock) { _audioBuffer.Write(frame.Value.Payload, 0, frame.Value.Payload.Length); }
+            if (frame.Value.Kind != FrameKind.Control)
                 continue;
-            }
 
             var msg = FrameProtocol.DecodeControl(frame.Value);
             switch (msg.Type)
             {
-                case ControlType.CaptureStarted:
-                    _sampleRate = msg.SampleRate;
-                    _channels = msg.Channels;
-                    break;
-                case ControlType.CaptureStopped:
-                    await FinalizeAsync(ct).ConfigureAwait(false);
+                case ControlType.Transcript:
+                    string text = msg.Text ?? string.Empty;
+                    Log.Info($"transcript (session {msg.SessionId}): \"{text}\"");
+                    if (!string.IsNullOrWhiteSpace(text))
+                        _postToUi(() => Inject(text));
                     break;
                 case ControlType.Error:
+                    Log.Error($"Beta error: {msg.Message}");
                     Report(AlphaStatus.Error, msg.Message);
                     break;
             }
-        }
-    }
-
-    private async Task FinalizeAsync(CancellationToken ct)
-    {
-        byte[] pcm;
-        lock (_bufLock) { pcm = _audioBuffer.ToArray(); }
-        _currentSession = -1;
-
-        if (pcm.Length == 0)
-        {
-            Report(AlphaStatus.Connected, "no audio");
-            return;
-        }
-
-        Report(AlphaStatus.Transcribing, null);
-        try
-        {
-            byte[] wav = WavBuilder.BuildPcm16(pcm, _sampleRate, _channels);
-            string text = await _speaches.TranscribeAsync(wav, ct).ConfigureAwait(false);
-            if (!string.IsNullOrWhiteSpace(text))
-                _postToUi(() => Inject(text));
-            Report(AlphaStatus.Connected, null);
-        }
-        catch (Exception ex)
-        {
-            Report(AlphaStatus.Error, ex.Message);
         }
     }
 
@@ -176,9 +144,11 @@ public sealed class AlphaService : IDisposable
                 TextInjector.PasteViaClipboard(text);
             else
                 TextInjector.TypeUnicode(text);
+            Log.Info($"injected {text.Length} chars via {(_config.InjectViaClipboard ? "clipboard" : "keystrokes")}");
         }
         catch (Exception ex)
         {
+            Log.Error("inject failed", ex);
             Report(AlphaStatus.Error, $"inject failed: {ex.Message}");
         }
     }
@@ -195,11 +165,5 @@ public sealed class AlphaService : IDisposable
     {
         _cts.Cancel();
         _cts.Dispose();
-    }
-
-    private static class BetaDefaults
-    {
-        public const int SampleRate = 16000;
-        public const int Channels = 1;
     }
 }

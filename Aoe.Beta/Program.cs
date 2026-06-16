@@ -2,9 +2,6 @@ namespace Aoe.Beta;
 
 static class Program
 {
-    private static readonly string LogPath =
-        Path.Combine(AppContext.BaseDirectory, "aoe-beta.log");
-
     [STAThread]
     static void Main()
     {
@@ -13,14 +10,14 @@ static class Program
         Application.ThreadException += (_, e) =>
             Fatal("Application.ThreadException", e.Exception);
         TaskScheduler.UnobservedTaskException += (_, e) =>
-            Log("UnobservedTaskException", e.Exception);
+            Log.Error("UnobservedTaskException", e.Exception);
 
         try
         {
-            Log("startup", null);
+            Log.Info("==== startup ====");
             ApplicationConfiguration.Initialize();
             Application.Run(new BetaTrayContext());
-            Log("clean exit", null);
+            Log.Info("clean exit");
         }
         catch (Exception ex)
         {
@@ -30,7 +27,7 @@ static class Program
 
     private static void Fatal(string where, Exception? ex)
     {
-        Log(where, ex);
+        Log.Error($"FATAL in {where}", ex);
         try
         {
             MessageBox.Show(
@@ -40,15 +37,5 @@ static class Program
                 MessageBoxIcon.Error);
         }
         catch { /* nothing more we can do */ }
-    }
-
-    private static void Log(string where, Exception? ex)
-    {
-        try
-        {
-            string line = $"[{DateTime.Now:O}] {where}{(ex is null ? "" : ": " + ex)}{Environment.NewLine}";
-            File.AppendAllText(LogPath, line);
-        }
-        catch { /* ignore logging failures */ }
     }
 }

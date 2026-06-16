@@ -1,6 +1,6 @@
 using System.Text;
 
-namespace Aoe.Alpha;
+namespace Aoe.Beta;
 
 /// <summary>Wraps raw little-endian 16-bit PCM samples in a minimal WAV (RIFF) container.</summary>
 public static class WavBuilder

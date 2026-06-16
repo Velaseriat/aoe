@@ -2,20 +2,41 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace Aoe.Alpha;
+namespace Aoe.Beta;
 
 /// <summary>Minimal client for the Speaches (OpenAI-compatible) transcription endpoint.</summary>
 public sealed class SpeachesClient
 {
     private readonly HttpClient _http;
-    private readonly AlphaConfig _config;
+    private readonly BetaConfig _config;
 
-    public SpeachesClient(AlphaConfig config)
+    public SpeachesClient(BetaConfig config)
     {
         _config = config;
         _http = new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
         if (!string.IsNullOrWhiteSpace(config.SpeachesApiKey))
             _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", config.SpeachesApiKey);
+    }
+
+    /// <summary>Returns true if the Speaches server answers its health check.</summary>
+    public async Task<bool> IsHealthyAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            string baseUrl = _config.SpeachesBaseUrl.TrimEnd('/');
+            // /v1 -> server root for /health
+            string root = baseUrl.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)
+                ? baseUrl[..^3]
+                : baseUrl;
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(4));
+            using HttpResponseMessage resp = await _http.GetAsync($"{root}/health", cts.Token).ConfigureAwait(false);
+            return resp.IsSuccessStatusCode;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public async Task<string> TranscribeAsync(byte[] wav, CancellationToken ct = default)
