@@ -22,3 +22,6 @@ publish/
 
 # Runtime crash logs
 aoe-*.log
+
+
+openai_secret
