@@ -71,7 +71,7 @@ public sealed class AlphaTrayContext : ApplicationContext
         }
     }
 
-    private void OnNotify(string title, string message)
+    private void OnNotify(string title, string message, string? imageUrl)
     {
         RunOnUi(() =>
         {
@@ -80,7 +80,7 @@ public sealed class AlphaTrayContext : ApplicationContext
                 // Prefer the rich WebView2 popup; fall back to the balloon if it isn't ready yet.
                 if (_popup.IsReady)
                 {
-                    _popup.ShowAnswer(title, message);
+                    _popup.ShowAnswer(title, message, imageUrl);
                     return;
                 }
 

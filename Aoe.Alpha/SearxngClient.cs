@@ -61,6 +61,37 @@ public sealed class SearxngClient
         return sb.ToString().TrimEnd();
     }
 
+    /// <summary>
+    /// Image search. Returns a short text result for the model plus the best https image URL (or null)
+    /// for the popup to display.
+    /// </summary>
+    public async Task<(string Text, string? ImageUrl)> ImageSearchAsync(string query, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+            return ("No query provided.", null);
+
+        string url = $"search?q={Uri.EscapeDataString(query)}&format=json&categories=images";
+        SearxResponse? resp;
+        try
+        {
+            resp = await _http.GetFromJsonAsync<SearxResponse>(url, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return ($"Image search failed: {ex.Message}", null);
+        }
+
+        SearxResult? best = resp?.Results?
+            .FirstOrDefault(r => !string.IsNullOrWhiteSpace(r.ImgSrc)
+                && r.ImgSrc!.StartsWith("https://", StringComparison.OrdinalIgnoreCase));
+
+        if (best is null)
+            return ("No suitable image found.", null);
+
+        string title = string.IsNullOrWhiteSpace(best.Title) ? "image" : best.Title!;
+        return ($"Found an image ({title}); it will be shown to the user automatically.", best.ImgSrc);
+    }
+
     private static string Collapse(string s)
     {
         s = s.Replace('\n', ' ').Replace('\r', ' ').Trim();
@@ -77,5 +108,7 @@ public sealed class SearxngClient
         [JsonPropertyName("title")] public string? Title { get; set; }
         [JsonPropertyName("url")] public string? Url { get; set; }
         [JsonPropertyName("content")] public string? Content { get; set; }
+        [JsonPropertyName("img_src")] public string? ImgSrc { get; set; }
+        [JsonPropertyName("thumbnail_src")] public string? ThumbnailSrc { get; set; }
     }
 }

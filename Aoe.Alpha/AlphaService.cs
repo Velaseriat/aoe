@@ -34,8 +34,8 @@ public sealed class AlphaService : IDisposable
 
     public event Action<AlphaStatus, string?>? StatusChanged;
 
-    /// <summary>Raised when the assistant has an answer to surface as a toast (title, message).</summary>
-    public event Action<string, string>? Notify;
+    /// <summary>Raised when the assistant has an answer to surface (question, answer markdown, optional image URL).</summary>
+    public event Action<string, string, string?>? Notify;
 
     public AlphaService(AlphaConfig config, Action<Action> postToUi)
     {
@@ -54,6 +54,19 @@ public sealed class AlphaService : IDisposable
             properties = new
             {
                 query = new { type = "string", description = "The search query" },
+            },
+            required = new[] { "query" },
+        });
+
+    private static readonly ToolSpec ImageSearchTool = new(
+        "image_search",
+        "Find an image to show alongside your answer. Use ONLY when a picture genuinely helps (e.g. what a person, place, animal, object, or logo looks like). The image is displayed to the user automatically, so do not embed it yourself. Skip this for abstract or text-only answers.",
+        new
+        {
+            type = "object",
+            properties = new
+            {
+                query = new { type = "string", description = "What to find an image of" },
             },
             required = new[] { "query" },
         });
@@ -180,29 +193,52 @@ public sealed class AlphaService : IDisposable
         }
     }
 
-    /// <summary>Assistant mode: ask Gemma (with web_search) and surface the answer as a toast.</summary>
+    /// <summary>Assistant mode: ask Gemma (with web/image search) and surface the answer in the popup.</summary>
     private async Task HandleAssistantAsync(string question)
     {
         Report(AlphaStatus.Thinking, null);
+        // Captured by the tool executor below; the model picks an image only when it calls image_search.
+        string? imageUrl = null;
         try
         {
+            ToolExecutor exec = async (name, argsJson, ct) =>
+            {
+                string query = ParseQuery(argsJson);
+                if (string.Equals(name, "web_search", StringComparison.OrdinalIgnoreCase))
+                {
+                    Log.Info($"tool web_search: \"{query}\"");
+                    Report(AlphaStatus.Thinking, $"searching: {query}");
+                    return await _searx.SearchAsync(query, _config.SearchResultCount, ct).ConfigureAwait(false);
+                }
+                if (string.Equals(name, "image_search", StringComparison.OrdinalIgnoreCase))
+                {
+                    Log.Info($"tool image_search: \"{query}\"");
+                    Report(AlphaStatus.Thinking, $"image: {query}");
+                    (string text, string? url) = await _searx.ImageSearchAsync(query, ct).ConfigureAwait(false);
+                    if (url is not null)
+                        imageUrl = url;
+                    return text;
+                }
+                return $"Unknown tool: {name}";
+            };
+
             string answer = await _gemma.AskAsync(
                 question,
-                new[] { WebSearchTool },
-                ExecuteToolAsync,
+                new[] { WebSearchTool, ImageSearchTool },
+                exec,
                 _config.AssistantMaxToolIterations,
                 _cts.Token).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(answer))
                 answer = "(no answer)";
-            Log.Info($"assistant answer: \"{answer}\"");
+            Log.Info($"assistant answer: \"{answer}\"" + (imageUrl is null ? "" : $" [image: {imageUrl}]"));
             // Raw markdown; the popup renders it (the balloon fallback strips it).
-            Notify?.Invoke(question, answer);
+            Notify?.Invoke(question, answer, imageUrl);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
             Log.Error("assistant request failed", ex);
-            Notify?.Invoke("Assistant error", ex.Message);
+            Notify?.Invoke("Assistant error", ex.Message, null);
             Report(AlphaStatus.Error, $"assistant: {ex.Message}");
         }
         finally
@@ -212,27 +248,19 @@ public sealed class AlphaService : IDisposable
         }
     }
 
-    /// <summary>Runs a tool the model asked for. Currently only web_search via SearXNG.</summary>
-    private async Task<string> ExecuteToolAsync(string name, string argumentsJson, CancellationToken ct)
+    /// <summary>Extracts the "query" string from a tool call's JSON arguments.</summary>
+    private static string ParseQuery(string argumentsJson)
     {
-        if (!string.Equals(name, "web_search", StringComparison.OrdinalIgnoreCase))
-            return $"Unknown tool: {name}";
-
-        string query;
         try
         {
             using var doc = System.Text.Json.JsonDocument.Parse(
                 string.IsNullOrWhiteSpace(argumentsJson) ? "{}" : argumentsJson);
-            query = doc.RootElement.TryGetProperty("query", out var q) ? q.GetString() ?? "" : "";
+            return doc.RootElement.TryGetProperty("query", out var q) ? q.GetString() ?? "" : "";
         }
         catch
         {
-            query = "";
+            return "";
         }
-
-        Log.Info($"tool web_search: \"{query}\"");
-        Report(AlphaStatus.Thinking, $"searching: {query}");
-        return await _searx.SearchAsync(query, _config.SearchResultCount, ct).ConfigureAwait(false);
     }
 
     private void Inject(string text)

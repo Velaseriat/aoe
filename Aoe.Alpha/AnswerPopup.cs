@@ -16,7 +16,7 @@ public sealed class AnswerPopup : Form
     private const int MaxHeight = 600;
     private const int MinHeight = 70;
     private const int EdgeMargin = 16;
-    private const int AutoDismissMs = 14000;
+    private const int AutoDismissMs = 28000;
 
     private static readonly MarkdownPipeline Pipeline =
         new MarkdownPipelineBuilder().UseAdvancedExtensions().Build();
@@ -25,7 +25,7 @@ public sealed class AnswerPopup : Form
     private readonly System.Windows.Forms.Timer _dismiss;
     private bool _ready;
     private bool _hovered;
-    private (string Question, string Markdown)? _pending;
+    private (string Question, string Markdown, string? ImageUrl)? _pending;
 
     public AnswerPopup()
     {
@@ -72,7 +72,7 @@ public sealed class AnswerPopup : Form
             if (_pending is { } p)
             {
                 _pending = null;
-                Render(p.Question, p.Markdown);
+                Render(p.Question, p.Markdown, p.ImageUrl);
             }
         }
         catch (Exception ex)
@@ -85,21 +85,24 @@ public sealed class AnswerPopup : Form
     public bool IsReady => _ready;
 
     /// <summary>Render and show an answer. Safe to call before init completes (it queues).</summary>
-    public void ShowAnswer(string question, string markdown)
+    public void ShowAnswer(string question, string markdown, string? imageUrl = null)
     {
         if (!_ready)
         {
-            _pending = (question, markdown);
+            _pending = (question, markdown, imageUrl);
             return;
         }
-        Render(question, markdown);
+        Render(question, markdown, imageUrl);
     }
 
-    private void Render(string question, string markdown)
+    private void Render(string question, string markdown, string? imageUrl)
     {
         string body = Markdown.ToHtml(markdown ?? string.Empty, Pipeline);
         string q = WebUtility.HtmlEncode(question ?? string.Empty);
-        string html = Template.Replace("{QUESTION}", q).Replace("{BODY}", body);
+        string img = string.IsNullOrWhiteSpace(imageUrl)
+            ? ""
+            : $"<div class=\"img\"><img src=\"{WebUtility.HtmlEncode(imageUrl)}\" onload=\"post('resize')\" onerror=\"this.parentNode.remove();post('resize')\"></div>";
+        string html = Template.Replace("{QUESTION}", q).Replace("{BODY}", body).Replace("{IMAGE}", img);
         _web.CoreWebView2.NavigateToString(html);
     }
 
@@ -152,6 +155,9 @@ public sealed class AnswerPopup : Form
                 _dismiss.Stop();
                 _dismiss.Start();
                 break;
+            case "resize":
+                _ = ResizeToContentAsync();
+                break;
         }
     }
 
@@ -179,10 +185,13 @@ public sealed class AnswerPopup : Form
         pre{background:#2a2a30;padding:9px 11px;border-radius:6px;overflow:auto}
         pre code{background:none;padding:0}
         a{color:#4ea1ff}
+        .img{margin-top:10px}
+        .img img{max-width:100%;max-height:300px;border-radius:6px;display:block}
         ::-webkit-scrollbar{width:9px}::-webkit-scrollbar-thumb{background:#3a3a42;border-radius:5px}
         </style></head><body>
         <div class="q">{QUESTION}</div>
         <div class="a">{BODY}</div>
+        {IMAGE}
         <script>
         const post=m=>window.chrome.webview.postMessage(m);
         document.body.addEventListener('click',()=>post('close'));
