@@ -1,88 +1,102 @@
-# AOE — Audio Over Ethernet
+# AOE - Voice Dictation
 
-Stream system audio from **Computer Beta** (Windows 11) to **Computer Alpha** (Windows 11) over the network. Both apps run in the system tray and show connection status.
+Push-to-talk voice dictation across two Windows machines, transcribed by a self-hosted
+[Speaches](https://github.com/speaches-ai/speaches) (faster-whisper) server.
+
+- **Alpha** - your workstation (screen + keyboard). Holds the PTT key, talks to Speaches, and
+  types the transcript into whatever app is focused.
+- **Beta** - the audio box (mic + speakers). Captures the mic on command and streams it to Alpha.
+- **miku** - GPU server (4070 Super) running Speaches for speech-to-text.
+
+```
+Hold PTT (F24) on Alpha
+  -> Alpha tells Beta to record
+  -> Beta streams mic audio (16 kHz mono PCM) -> Alpha
+Release PTT
+  -> Alpha builds a WAV, POSTs to Speaches (/v1/audio/transcriptions)
+  -> transcript pasted into the focused app
+```
+
+## Projects
+
+| Project | Runs on | Role |
+|---------|---------|------|
+| `Aoe.Protocol` | shared | TCP framing + control/audio message models |
+| `Aoe.Beta` | Beta | mic capture (NAudio), control server, tray |
+| `Aoe.Alpha` | Alpha | PTT keyboard hook, Speaches client, text injection, tray |
 
 ## Requirements
 
-- **Rust** — install first (see below)
-- **Windows 11** (sender uses WASAPI loopback; receiver uses cpal; this setup targets Windows)
-
-### Installing Rust (Windows)
-
-1. Download and run **rustup-init.exe**: https://win.rustup.rs/x86_64  
-2. Accept the default options (press Enter).  
-3. When it finishes, **close and reopen PowerShell** (or restart the terminal) so `cargo` is on your PATH.  
-4. For linking, Rust needs the Microsoft linker (`link.exe`). Either:
-   - Install [Build Tools for Visual Studio](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with **“Desktop development with C++”**, then run **Developer PowerShell for VS** (Start menu) and run `cargo build` from there; or
-   - Run `.\find-linker.ps1` in this repo to find `link.exe` and add its folder to your PATH; or
-   - Use the GNU toolchain instead (no Visual Studio): `rustup default stable-x86_64-pc-windows-gnu` and install MinGW via [MSYS2](https://www.msys2.org/) (`pacman -S mingw-w64-ucrt-x86_64-toolchain`), then add `C:\msys64\ucrt64\bin` to PATH.
+- **.NET 8 SDK** (https://dotnet.microsoft.com/download)
+- **Windows** on both Alpha and Beta
+- A reachable **Speaches** server (see below)
 
 ## Build
 
-From the repo root:
-
-```bash
-cargo build --release
+```powershell
+dotnet build Aoe.sln -c Release
 ```
 
-Binaries:
+Or publish self-contained single-exe per agent:
 
-- `target/release/aoe-sender.exe` — run on **Beta** (audio source)
-- `target/release/aoe-receiver.exe` — run on **Alpha** (audio playback)
-
-## Usage
-
-### 1. Alpha (receiver)
-
-Start first so it is listening:
-
-```bash
-aoe-receiver [PORT]
+```powershell
+dotnet publish Aoe.Beta  -c Release -r win-x64 --self-contained -p:PublishSingleFile=true
+dotnet publish Aoe.Alpha -c Release -r win-x64 --self-contained -p:PublishSingleFile=true
 ```
 
-Default port: `38472`. Example:
+## Configure Alpha
 
-```bash
-aoe-receiver
-# or
-aoe-receiver 38472
+Edit `Aoe.Alpha/appsettings.json` (copied next to the exe):
+
+```json
+{
+  "BetaHost": "192.168.1.50",
+  "BetaPort": 38473,
+  "SpeachesBaseUrl": "http://<miku-ip>:8000/v1",
+  "SpeachesModel": "deepdml/faster-whisper-large-v3-turbo-ct2",
+  "SpeachesApiKey": null,
+  "Language": "en",
+  "PushToTalkVk": 135,
+  "InjectViaClipboard": true
+}
 ```
 
-Tray icon: **AOE Receiver**. Tooltip: *Waiting* → *Connected* when Beta connects.
+- `PushToTalkVk` 135 = `0x87` = **VK_F24**. Bind your ROG Chakram joystick direction to F24 in
+  Armoury Crate (hold = key down, release = key up).
+- `InjectViaClipboard` true pastes via Ctrl+V (reliable); false types characters directly.
 
-### 2. Beta (sender)
+Beta listens on `AOE_PORT` if set, otherwise port 38473.
 
-Connect to Alpha’s IP and port:
+## Run
+
+1. On **Beta**: launch `Aoe.Beta.exe` (tray shows "listening" then "connected"/"recording").
+2. On **Alpha**: launch `Aoe.Alpha.exe` (tray shows "ready" when connected to Beta).
+3. Hold your PTT key, speak, release. The transcript is pasted into the focused window.
+
+Local single-machine test: set `BetaHost` to `127.0.0.1` and run both on one PC.
+
+## Speaches on miku
 
 ```bash
-aoe-sender <ALPHA_IP> [PORT]
+# verify GPU is visible to Docker
+docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
+
+# run Speaches (CUDA)
+docker run --gpus=all --name speaches -p 8000:8000 \
+  -v hf-hub-cache:/home/ubuntu/.cache/huggingface/hub -d \
+  ghcr.io/speaches-ai/speaches:latest-cuda
+
+# smoke test
+curl -X POST http://localhost:8000/v1/audio/transcriptions \
+  -F file=@test.wav -F model=deepdml/faster-whisper-large-v3-turbo-ct2
 ```
 
-Examples:
+Open TCP 8000 on miku and TCP 38473 on Beta in their firewalls.
 
-```bash
-aoe-sender 192.168.1.100
-aoe-sender 192.168.1.100 38472
-```
+## Notes & roadmap
 
-Replace `192.168.1.100` with Alpha’s actual IP (or hostname). If you run both on one machine, use `127.0.0.1`.
-
-Tray icon: **AOE Sender**. Tooltip: *Idle* → *Streaming* when connected and sending.
-
-### 3. Quit
-
-Right‑click the tray icon → **Quit** on either app.
-
-## How it works
-
-- **Sender (Beta):** Uses WASAPI to capture the default **render** (playback) device in loopback mode (system audio). Encodes 44.1 kHz stereo f32 PCM and sends it over TCP to Alpha.
-- **Receiver (Alpha):** Listens for TCP connections, reads the stream, and plays it with **cpal** on the default output device. A small queue smooths network jitter.
-
-## Firewall
-
-On **Alpha**, allow inbound TCP on the chosen port (e.g. 38472) so Beta can connect.
-
-## Notes
-
-- **Loopback:** The sender uses the default Windows output device in loopback mode. If your setup doesn’t support that (e.g. some drivers), you may only get silence or need to use application-specific loopback (not implemented here).
-- **Latency:** Expect roughly a few hundred ms due to buffering and network. Tuning chunk size and buffer in code can reduce it at the cost of stability.
+- v1 is whole-utterance: it transcribes once on release. Streaming/partial results are a future
+  enhancement (Speaches supports SSE).
+- Beta keeps a speaker-playback path reserved for a future **assistant mode** (a second joystick
+  direction): STT -> LLM -> TTS (`/v1/audio/speech`) -> Beta speakers.
+- The original Rust prototype lives in git history at commit `ad71102`.

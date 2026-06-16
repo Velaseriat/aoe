@@ -1,2 +1,22 @@
+# .NET
+bin/
+obj/
+*.user
+
+# IDE (Rider / Visual Studio)
+.idea/
+.vs/
+*.sln.DotSettings.user
+
+# Rust (legacy)
 /target/
 *.pdb
+
+# Local backups / artifacts
+*.zip
+
+# Published / portable build output
+dist/
+
+# Runtime crash logs
+aoe-*.log
