@@ -22,6 +22,7 @@ public sealed class AlphaService : IDisposable
     private readonly AlphaConfig _config;
     private readonly Action<Action> _postToUi;
     private readonly GemmaClient _gemma;
+    private readonly SearxngClient _searx;
     private readonly CancellationTokenSource _cts = new();
     private readonly ConcurrentDictionary<long, Mode> _sessionModes = new();
 
@@ -41,7 +42,21 @@ public sealed class AlphaService : IDisposable
         _config = config;
         _postToUi = postToUi;
         _gemma = new GemmaClient(config.AssistantBaseUrl, config.AssistantModel, config.AssistantSystemPrompt);
+        _searx = new SearxngClient(config.SearxngBaseUrl, config.SearchResultCount);
     }
+
+    private static readonly ToolSpec WebSearchTool = new(
+        "web_search",
+        "Search the web for current, recent, or factual information when you are unsure or the question concerns current events. Returns the top results with titles, snippets, and URLs.",
+        new
+        {
+            type = "object",
+            properties = new
+            {
+                query = new { type = "string", description = "The search query" },
+            },
+            required = new[] { "query" },
+        });
 
     public void Start() => _ = Task.Run(() => ConnectLoopAsync(_cts.Token));
 
@@ -165,16 +180,22 @@ public sealed class AlphaService : IDisposable
         }
     }
 
-    /// <summary>Assistant mode: ask Gemma and surface the answer as a toast (no text injection).</summary>
+    /// <summary>Assistant mode: ask Gemma (with web_search) and surface the answer as a toast.</summary>
     private async Task HandleAssistantAsync(string question)
     {
         Report(AlphaStatus.Thinking, null);
         try
         {
-            string answer = await _gemma.AskAsync(question, _cts.Token).ConfigureAwait(false);
+            string answer = await _gemma.AskAsync(
+                question,
+                new[] { WebSearchTool },
+                ExecuteToolAsync,
+                _config.AssistantMaxToolIterations,
+                _cts.Token).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(answer))
                 answer = "(no answer)";
             Log.Info($"assistant answer: \"{answer}\"");
+            // Raw markdown; the popup renders it (the balloon fallback strips it).
             Notify?.Invoke(question, answer);
         }
         catch (OperationCanceledException) { }
@@ -189,6 +210,29 @@ public sealed class AlphaService : IDisposable
             if (_connected && _currentSession < 0)
                 Report(AlphaStatus.Connected, null);
         }
+    }
+
+    /// <summary>Runs a tool the model asked for. Currently only web_search via SearXNG.</summary>
+    private async Task<string> ExecuteToolAsync(string name, string argumentsJson, CancellationToken ct)
+    {
+        if (!string.Equals(name, "web_search", StringComparison.OrdinalIgnoreCase))
+            return $"Unknown tool: {name}";
+
+        string query;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(
+                string.IsNullOrWhiteSpace(argumentsJson) ? "{}" : argumentsJson);
+            query = doc.RootElement.TryGetProperty("query", out var q) ? q.GetString() ?? "" : "";
+        }
+        catch
+        {
+            query = "";
+        }
+
+        Log.Info($"tool web_search: \"{query}\"");
+        Report(AlphaStatus.Thinking, $"searching: {query}");
+        return await _searx.SearchAsync(query, _config.SearchResultCount, ct).ConfigureAwait(false);
     }
 
     private void Inject(string text)

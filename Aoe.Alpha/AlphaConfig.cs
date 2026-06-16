@@ -23,13 +23,24 @@ public sealed class AlphaConfig
     /// <summary>OpenAI-compatible base URL for the assistant LLM (local Gemma via Ollama, over Caddy TLS).</summary>
     public string AssistantBaseUrl { get; set; } = "https://coom.felsan.net:11443/v1";
 
-    /// <summary>Model name for the assistant LLM.</summary>
-    public string AssistantModel { get; set; } = "gemma3:4b";
+    /// <summary>Model name for the assistant LLM. gemma4 supports native tool-calling.</summary>
+    public string AssistantModel { get; set; } = "gemma4:latest";
+
+    /// <summary>Base URL of the SearXNG instance used for the web_search tool (over Caddy TLS).</summary>
+    public string SearxngBaseUrl { get; set; } = "https://coom.felsan.net:8443";
+
+    /// <summary>How many web results to feed back to the model per search.</summary>
+    public int SearchResultCount { get; set; } = 5;
+
+    /// <summary>Safety cap on tool-call round trips before forcing a final answer.</summary>
+    public int AssistantMaxToolIterations { get; set; } = 4;
 
     /// <summary>System prompt steering the assistant toward short, toast-friendly answers.</summary>
     public string AssistantSystemPrompt { get; set; } =
-        "You are a concise voice assistant. Answer in 1-3 short sentences suitable for a desktop notification. "
-        + "If you are unsure or the question concerns a recent or current event, say so briefly rather than guessing.";
+        "You are a concise voice assistant whose replies are shown in a small desktop notification with a hard "
+        + "limit of 255 characters (about 40 words). Use the web_search tool whenever the question concerns current "
+        + "events, recent facts, or anything you are not confident about; otherwise answer directly. After any search, "
+        + "give your final answer under the limit: 1-2 short sentences, no preamble, no follow-up questions, no markdown.";
 
     public static AlphaConfig Load()
     {

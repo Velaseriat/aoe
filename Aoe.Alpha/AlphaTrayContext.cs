@@ -10,6 +10,7 @@ public sealed class AlphaTrayContext : ApplicationContext
     private readonly AlphaConfig _config;
     private readonly AlphaService _service;
     private readonly PushToTalkHook _hook;
+    private readonly AnswerPopup _popup;
     private Icon? _currentIcon;
 
     public AlphaTrayContext()
@@ -38,6 +39,8 @@ public sealed class AlphaTrayContext : ApplicationContext
         _tray.BalloonTipTitle = "AOE Alpha";
         _tray.BalloonTipText = $"Running in the tray. Dictate (vk=0x{_config.PushToTalkVk:X2}), Assistant (vk=0x{_config.AssistantPushToTalkVk:X2}); connecting to Beta...";
         _tray.ShowBalloonTip(4000);
+
+        _popup = new AnswerPopup();
 
         _service = new AlphaService(_config, RunOnUi);
         _service.StatusChanged += OnStatusChanged;
@@ -74,16 +77,23 @@ public sealed class AlphaTrayContext : ApplicationContext
         {
             try
             {
-                // Balloon title/text have hard length limits; trim so ShowBalloonTip doesn't throw.
+                // Prefer the rich WebView2 popup; fall back to the balloon if it isn't ready yet.
+                if (_popup.IsReady)
+                {
+                    _popup.ShowAnswer(title, message);
+                    return;
+                }
+
                 _tray.BalloonTipTitle = Truncate(string.IsNullOrWhiteSpace(title) ? "AOE Assistant" : title);
-                _tray.BalloonTipText = string.IsNullOrEmpty(message)
-                    ? "(no answer)"
-                    : (message.Length <= 255 ? message : message[..255]);
+                _tray.BalloonTipText = string.IsNullOrEmpty(message) ? "(no answer)" : ClampForToast(StripMarkup(message));
                 _tray.ShowBalloonTip(8000);
             }
             catch { /* tray disposing */ }
         });
     }
+
+    private static string StripMarkup(string s) =>
+        s.Replace("**", "").Replace("__", "").Replace("`", "").Replace("#", "");
 
     private void OnStatusChanged(AlphaStatus status, string? detail)
     {
@@ -129,12 +139,25 @@ public sealed class AlphaTrayContext : ApplicationContext
 
     private static string Truncate(string s) => s.Length <= 63 ? s : s[..63];
 
+    /// <summary>Balloon body is capped at 255 chars; trim at a word boundary and add an ellipsis.</summary>
+    private static string ClampForToast(string s)
+    {
+        if (s.Length <= 255)
+            return s;
+        string head = s[..254];
+        int lastSpace = head.LastIndexOf(' ');
+        if (lastSpace > 200)
+            head = head[..lastSpace];
+        return head.TrimEnd() + "\u2026";
+    }
+
     protected override void Dispose(bool disposing)
     {
         if (disposing)
         {
             _hook.Dispose();
             _service.Dispose();
+            _popup.Dispose();
             _tray.Visible = false;
             _tray.Dispose();
             _currentIcon?.Dispose();
