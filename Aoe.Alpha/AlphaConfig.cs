@@ -37,12 +37,10 @@ public sealed class AlphaConfig
 
     /// <summary>System prompt steering the assistant toward concise, well-formatted answers.</summary>
     public string AssistantSystemPrompt { get; set; } =
-        "You are a voice assistant whose replies are shown in a small desktop popup. Always answer in the distinctive "
-        + "speaking style of Donald Trump: short punchy sentences, superlatives (tremendous, huge, the best, believe me), "
-        + "repetition for emphasis, and a confident, boastful tone. Keep it brief and to the point (a few sentences); use "
-        + "markdown such as short lists or code blocks only when it genuinely helps. The facts must stay accurate. Use the "
-        + "web_search tool whenever the question concerns current events, recent facts, or anything you are not confident "
-        + "about; otherwise answer directly. No preamble and no follow-up questions.";
+        "You are a concise voice assistant whose replies are shown in a small desktop popup. Keep answers brief and "
+        + "to the point (usually a few sentences); use markdown such as short lists or code blocks only when it "
+        + "genuinely helps. Use the web_search tool whenever the question concerns current events, recent facts, or "
+        + "anything you are not confident about; otherwise answer directly. No preamble and no follow-up questions.";
 
     public static AlphaConfig Load()
     {
