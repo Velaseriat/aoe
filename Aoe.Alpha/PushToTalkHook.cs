@@ -4,8 +4,9 @@ using System.Runtime.InteropServices;
 namespace Aoe.Alpha;
 
 /// <summary>
-/// Global low-level keyboard hook (WH_KEYBOARD_LL) that reports clean key-down / key-up for a
-/// single virtual-key. Must be installed on a thread that pumps Windows messages (the UI thread).
+/// Global low-level keyboard hook (WH_KEYBOARD_LL) that reports clean key-down / key-up for a set
+/// of virtual-keys, passing the vk that fired. Must be installed on a thread that pumps Windows
+/// messages (the UI thread). Keys are observed, not swallowed, so they still work normally.
 /// </summary>
 public sealed class PushToTalkHook : IDisposable
 {
@@ -16,20 +17,20 @@ public sealed class PushToTalkHook : IDisposable
     private const int WM_SYSKEYDOWN = 0x0104;
     private const int WM_SYSKEYUP = 0x0105;
 
-    private readonly int _targetVk;
+    private readonly HashSet<int> _targets;
+    private readonly HashSet<int> _down = new();
     private readonly LowLevelKeyboardProc _proc; // kept alive to prevent GC of the callback
     private IntPtr _hook = IntPtr.Zero;
-    private bool _isDown;
 
-    /// <summary>Raised once when the key transitions up-&gt;down (auto-repeat is suppressed).</summary>
-    public event Action? Pressed;
+    /// <summary>Raised once when a target key transitions up-&gt;down (auto-repeat is suppressed).</summary>
+    public event Action<int>? Pressed;
 
-    /// <summary>Raised when the key is released.</summary>
-    public event Action? Released;
+    /// <summary>Raised when a target key is released.</summary>
+    public event Action<int>? Released;
 
-    public PushToTalkHook(int targetVk)
+    public PushToTalkHook(IEnumerable<int> targetVks)
     {
-        _targetVk = targetVk;
+        _targets = new HashSet<int>(targetVks);
         _proc = HookCallback;
     }
 
@@ -48,23 +49,17 @@ public sealed class PushToTalkHook : IDisposable
         {
             int msg = (int)wParam;
             int vk = Marshal.ReadInt32(lParam); // first field of KBDLLHOOKSTRUCT is vkCode
-            if (vk == _targetVk)
+            if (_targets.Contains(vk))
             {
                 if (msg is WM_KEYDOWN or WM_SYSKEYDOWN)
                 {
-                    if (!_isDown)
-                    {
-                        _isDown = true;
-                        Pressed?.Invoke();
-                    }
+                    if (_down.Add(vk))
+                        Pressed?.Invoke(vk);
                 }
                 else if (msg is WM_KEYUP or WM_SYSKEYUP)
                 {
-                    if (_isDown)
-                    {
-                        _isDown = false;
-                        Released?.Invoke();
-                    }
+                    if (_down.Remove(vk))
+                        Released?.Invoke(vk);
                 }
             }
         }

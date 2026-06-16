@@ -1,3 +1,5 @@
+using Aoe.Protocol;
+
 namespace Aoe.Alpha;
 
 /// <summary>Tray-only context: status icon, PTT keyboard hook, and the dictation service.</summary>
@@ -26,7 +28,7 @@ public sealed class AlphaTrayContext : ApplicationContext
         };
 
         var menu = new ContextMenuStrip();
-        menu.Items.Add($"AOE Alpha (PTT vk=0x{_config.PushToTalkVk:X2})").Enabled = false;
+        menu.Items.Add($"AOE Alpha - dictation 0x{_config.PushToTalkVk:X2} / assistant 0x{_config.AssistantPushToTalkVk:X2}").Enabled = false;
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Quit", null, (_, _) => ExitThread());
         _tray.ContextMenuStrip = menu;
@@ -34,15 +36,15 @@ public sealed class AlphaTrayContext : ApplicationContext
         // A balloon toast pops up even when Windows hides the icon in the tray overflow,
         // so the user gets clear confirmation the agent is running.
         _tray.BalloonTipTitle = "AOE Alpha";
-        _tray.BalloonTipText = $"Running in the system tray. Listening for PTT (vk=0x{_config.PushToTalkVk:X2}); connecting to Beta...";
+        _tray.BalloonTipText = $"Running in the system tray. Dictation: 0x{_config.PushToTalkVk:X2}, Assistant: 0x{_config.AssistantPushToTalkVk:X2}; connecting to Beta...";
         _tray.ShowBalloonTip(4000);
 
         _service = new AlphaService(_config, RunOnUi);
         _service.StatusChanged += OnStatusChanged;
         _service.Start();
 
-        _hook = new PushToTalkHook(_config.PushToTalkVk);
-        _hook.Pressed += _service.BeginCapture;
+        _hook = new PushToTalkHook(new[] { _config.PushToTalkVk, _config.AssistantPushToTalkVk });
+        _hook.Pressed += vk => _service.BeginCapture(vk, ModeForVk(vk));
         _hook.Released += _service.EndCapture;
         try
         {
@@ -53,6 +55,9 @@ public sealed class AlphaTrayContext : ApplicationContext
             OnStatusChanged(AlphaStatus.Error, $"hook: {ex.Message}");
         }
     }
+
+    private Mode ModeForVk(int vk) =>
+        vk == _config.AssistantPushToTalkVk ? Mode.Assistant : Mode.Dictation;
 
     private void RunOnUi(Action action)
     {
@@ -88,6 +93,7 @@ public sealed class AlphaTrayContext : ApplicationContext
     {
         AlphaStatus.Connected => Color.LimeGreen,
         AlphaStatus.Recording => Color.Red,
+        AlphaStatus.Thinking => Color.DeepSkyBlue,
         AlphaStatus.Error => Color.Gold,
         AlphaStatus.Disconnected => Color.Gray,
         _ => Color.Gray,
@@ -97,7 +103,8 @@ public sealed class AlphaTrayContext : ApplicationContext
     {
         AlphaStatus.Disconnected => detail is null ? "disconnected" : $"disconnected ({detail})",
         AlphaStatus.Connected => detail is null ? "ready" : $"ready - {detail}",
-        AlphaStatus.Recording => "recording",
+        AlphaStatus.Recording => detail is null ? "recording" : $"recording ({detail})",
+        AlphaStatus.Thinking => "thinking (assistant)",
         AlphaStatus.Error => $"error: {detail}",
         _ => status.ToString(),
     };

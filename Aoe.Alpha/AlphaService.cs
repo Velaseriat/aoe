@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net.Sockets;
 using Aoe.Protocol;
 
@@ -8,6 +9,7 @@ public enum AlphaStatus
     Disconnected,
     Connected,
     Recording,
+    Thinking,
     Error,
 }
 
@@ -20,11 +22,14 @@ public sealed class AlphaService : IDisposable
     private readonly AlphaConfig _config;
     private readonly Action<Action> _postToUi;
     private readonly CancellationTokenSource _cts = new();
+    private readonly OpenAiClient? _openai;
+    private readonly ConcurrentDictionary<long, Mode> _sessionModes = new();
 
     private FramedPeer? _peer;
     private volatile bool _connected;
     private long _sessionCounter;
     private long _currentSession = -1;
+    private int _activeVk = -1;
 
     public event Action<AlphaStatus, string?>? StatusChanged;
 
@@ -32,12 +37,18 @@ public sealed class AlphaService : IDisposable
     {
         _config = config;
         _postToUi = postToUi;
+
+        string? key = OpenAiClient.ResolveApiKey(config);
+        if (!string.IsNullOrWhiteSpace(key))
+            _openai = new OpenAiClient(config, key);
+        else
+            Log.Warn("OpenAI key not found; assistant mode disabled (set OPENAI_API_KEY or OpenAiKeyPath)");
     }
 
     public void Start() => _ = Task.Run(() => ConnectLoopAsync(_cts.Token));
 
-    /// <summary>Called on PTT key-down (UI thread).</summary>
-    public void BeginCapture()
+    /// <summary>Called on PTT key-down (UI thread). The key determines the capture mode.</summary>
+    public void BeginCapture(int vk, Mode mode)
     {
         FramedPeer? peer = _peer;
         if (!_connected || peer is null)
@@ -47,16 +58,25 @@ public sealed class AlphaService : IDisposable
             return;
         }
 
+        if (_activeVk >= 0)
+            return; // a capture is already in progress; ignore overlapping keys
+
+        _activeVk = vk;
         long id = Interlocked.Increment(ref _sessionCounter);
         _currentSession = id;
-        Log.Info($"PTT down -> StartCapture session {id}");
-        Report(AlphaStatus.Recording, null);
-        _ = SafeSendAsync(peer, ControlMessage.StartCapture(id, Mode.Dictation));
+        _sessionModes[id] = mode;
+        Log.Info($"PTT down ({mode}) -> StartCapture session {id}");
+        Report(AlphaStatus.Recording, mode == Mode.Assistant ? "assistant" : null);
+        _ = SafeSendAsync(peer, ControlMessage.StartCapture(id, mode));
     }
 
     /// <summary>Called on PTT key-up (UI thread).</summary>
-    public void EndCapture()
+    public void EndCapture(int vk)
     {
+        if (vk != _activeVk)
+            return; // only the key that started the capture ends it
+
+        _activeVk = -1;
         FramedPeer? peer = _peer;
         long id = _currentSession;
         _currentSession = -1;
@@ -124,8 +144,14 @@ public sealed class AlphaService : IDisposable
             {
                 case ControlType.Transcript:
                     string text = msg.Text ?? string.Empty;
-                    Log.Info($"transcript (session {msg.SessionId}): \"{text}\"");
-                    if (!string.IsNullOrWhiteSpace(text))
+                    long sid = msg.SessionId;
+                    Mode mode = _sessionModes.TryRemove(sid, out Mode m) ? m : Mode.Dictation;
+                    Log.Info($"transcript (session {sid}, {mode}): \"{text}\"");
+                    if (string.IsNullOrWhiteSpace(text))
+                        break;
+                    if (mode == Mode.Assistant)
+                        _ = HandleAssistantAsync(sid, text);
+                    else
                         // Trailing space so back-to-back dictations don't run together.
                         _postToUi(() => Inject(text.TrimEnd() + " "));
                     break;
@@ -134,6 +160,34 @@ public sealed class AlphaService : IDisposable
                     Report(AlphaStatus.Error, msg.Message);
                     break;
             }
+        }
+    }
+
+    private async Task HandleAssistantAsync(long sessionId, string question)
+    {
+        if (_openai is null)
+        {
+            Log.Error("assistant request but no OpenAI key configured");
+            Report(AlphaStatus.Error, "no OpenAI key");
+            return;
+        }
+
+        Report(AlphaStatus.Thinking, "asking OpenAI");
+        try
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            string answer = await _openai.AskAsync(question, _cts.Token).ConfigureAwait(false);
+            sw.Stop();
+            Log.Info($"assistant answer (session {sessionId}, {sw.ElapsedMilliseconds} ms): \"{answer}\"");
+            if (!string.IsNullOrWhiteSpace(answer))
+                _postToUi(() => Inject(answer.TrimEnd() + " "));
+            if (_connected)
+                Report(AlphaStatus.Connected, null);
+        }
+        catch (Exception ex)
+        {
+            Log.Error("assistant request failed", ex);
+            Report(AlphaStatus.Error, $"OpenAI: {ex.Message}");
         }
     }
 
