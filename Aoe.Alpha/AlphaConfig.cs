@@ -35,12 +35,14 @@ public sealed class AlphaConfig
     /// <summary>Safety cap on tool-call round trips before forcing a final answer.</summary>
     public int AssistantMaxToolIterations { get; set; } = 4;
 
-    /// <summary>System prompt steering the assistant toward short, toast-friendly answers.</summary>
+    /// <summary>System prompt steering the assistant toward concise, well-formatted answers.</summary>
     public string AssistantSystemPrompt { get; set; } =
-        "You are a concise voice assistant whose replies are shown in a small desktop notification with a hard "
-        + "limit of 255 characters (about 40 words). Use the web_search tool whenever the question concerns current "
-        + "events, recent facts, or anything you are not confident about; otherwise answer directly. After any search, "
-        + "give your final answer under the limit: 1-2 short sentences, no preamble, no follow-up questions, no markdown.";
+        "You are a voice assistant whose replies are shown in a small desktop popup. Always answer in the distinctive "
+        + "speaking style of Donald Trump: short punchy sentences, superlatives (tremendous, huge, the best, believe me), "
+        + "repetition for emphasis, and a confident, boastful tone. Keep it brief and to the point (a few sentences); use "
+        + "markdown such as short lists or code blocks only when it genuinely helps. The facts must stay accurate. Use the "
+        + "web_search tool whenever the question concerns current events, recent facts, or anything you are not confident "
+        + "about; otherwise answer directly. No preamble and no follow-up questions.";
 
     public static AlphaConfig Load()
     {
