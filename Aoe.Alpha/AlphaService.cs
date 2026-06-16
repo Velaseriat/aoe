@@ -126,7 +126,8 @@ public sealed class AlphaService : IDisposable
                     string text = msg.Text ?? string.Empty;
                     Log.Info($"transcript (session {msg.SessionId}): \"{text}\"");
                     if (!string.IsNullOrWhiteSpace(text))
-                        _postToUi(() => Inject(text));
+                        // Trailing space so back-to-back dictations don't run together.
+                        _postToUi(() => Inject(text.TrimEnd() + " "));
                     break;
                 case ControlType.Error:
                     Log.Error($"Beta error: {msg.Message}");
