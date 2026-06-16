@@ -17,6 +17,8 @@ obj/
 
 # Published / portable build output
 dist/
+release/
+publish/
 
 # Runtime crash logs
 aoe-*.log
